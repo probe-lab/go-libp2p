@@ -47,6 +47,9 @@ func (ad *activeDial) dial(ctx context.Context) (*Conn, error) {
 	if forceDirect, reason := network.GetForceDirectDial(ctx); forceDirect {
 		dialCtx = network.WithForceDirectDial(dialCtx, reason)
 	}
+	if disableBackoff, reason := network.GetDisableBackoff(ctx); disableBackoff {
+		dialCtx = network.WithDisableBackoff(dialCtx, reason)
+	}
 	if simConnect, isClient, reason := network.GetSimultaneousConnect(ctx); simConnect {
 		dialCtx = network.WithSimultaneousConnect(dialCtx, isClient, reason)
 	}

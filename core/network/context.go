@@ -14,11 +14,13 @@ type noDialCtxKey struct{}
 type dialPeerTimeoutCtxKey struct{}
 type forceDirectDialCtxKey struct{}
 type useTransientCtxKey struct{}
+type disableBackoffCtxKey struct{}
 type simConnectCtxKey struct{ isClient bool }
 
 var noDial = noDialCtxKey{}
 var forceDirectDial = forceDirectDialCtxKey{}
 var useTransient = useTransientCtxKey{}
+var disableBackoff = disableBackoffCtxKey{}
 var simConnectIsServer = simConnectCtxKey{}
 var simConnectIsClient = simConnectCtxKey{isClient: true}
 
@@ -103,6 +105,21 @@ func WithUseTransient(ctx context.Context, reason string) context.Context {
 // GetUseTransient returns true if the use transient option is set in the context.
 func GetUseTransient(ctx context.Context) (usetransient bool, reason string) {
 	v := ctx.Value(useTransient)
+	if v != nil {
+		return true, v.(string)
+	}
+	return false, ""
+}
+
+// WithDisableBackoff constructs a new context with an option that instructs the network
+// to not apply a backoff strategy when dialing a peer
+func WithDisableBackoff(ctx context.Context, reason string) context.Context {
+	return context.WithValue(ctx, disableBackoff, reason)
+}
+
+// GetDisableBackoff returns true if the disable backoff option is set in the context.
+func GetDisableBackoff(ctx context.Context) (bool, string) {
+	v := ctx.Value(disableBackoff)
 	if v != nil {
 		return true, v.(string)
 	}
