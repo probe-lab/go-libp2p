@@ -404,7 +404,9 @@ func (s *Swarm) resolveAddrs(ctx context.Context, pi peer.AddrInfo) ([]ma.Multia
 
 func (s *Swarm) dialNextAddr(ctx context.Context, p peer.ID, addr ma.Multiaddr, resch chan transport.DialUpdate) error {
 	// check the dial backoff
-	if forceDirect, _ := network.GetForceDirectDial(ctx); !forceDirect {
+	forceDirect, _ := network.GetForceDirectDial(ctx)
+	disableBackoff, _ := network.GetDisableBackoff(ctx)
+	if !forceDirect && !disableBackoff {
 		if s.backf.Backoff(p, addr) {
 			return ErrDialBackoff
 		}
