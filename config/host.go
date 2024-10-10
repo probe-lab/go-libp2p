@@ -9,12 +9,12 @@ import (
 	"go.uber.org/fx"
 )
 
-type closableBasicHost struct {
+type ClosableBasicHost struct {
 	*fx.App
 	*basichost.BasicHost
 }
 
-func (h *closableBasicHost) Close() error {
+func (h *ClosableBasicHost) Close() error {
 	_ = h.App.Stop(context.Background())
 	return h.BasicHost.Close()
 }
