@@ -595,7 +595,7 @@ func (cfg *Config) NewNode() (host.Host, error) {
 	if cfg.Routing != nil {
 		return &closableRoutedHost{App: app, RoutedHost: rh}, nil
 	}
-	return &closableBasicHost{App: app, BasicHost: bh}, nil
+	return &ClosableBasicHost{App: app, BasicHost: bh}, nil
 }
 
 func (cfg *Config) addAutoNAT(h *bhost.BasicHost) error {
