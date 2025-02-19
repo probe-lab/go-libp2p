@@ -10,15 +10,11 @@ import (
 	ma "github.com/multiformats/go-multiaddr"
 )
 
-// maxDialDialErrors is the maximum number of dial errors we record
-const maxDialDialErrors = 16
-
 // DialError is the error type returned when dialing.
 type DialError struct {
 	Peer       peer.ID
 	DialErrors []TransportError
 	Cause      error
-	Skipped    int
 }
 
 func (e *DialError) Timeout() bool {
@@ -26,10 +22,6 @@ func (e *DialError) Timeout() bool {
 }
 
 func (e *DialError) recordErr(addr ma.Multiaddr, err error) {
-	if len(e.DialErrors) >= maxDialDialErrors {
-		e.Skipped++
-		return
-	}
 	e.DialErrors = append(e.DialErrors, TransportError{Address: addr, Cause: err})
 }
 
@@ -41,9 +33,6 @@ func (e *DialError) Error() string {
 	}
 	for _, te := range e.DialErrors {
 		fmt.Fprintf(&builder, "\n  * [%s] %s", te.Address, te.Cause)
-	}
-	if e.Skipped > 0 {
-		fmt.Fprintf(&builder, "\n    ... skipping %d errors ...", e.Skipped)
 	}
 	return builder.String()
 }
