@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	logging "github.com/ipfs/go-log/v2"
 	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/network"
+	logging "github.com/libp2p/go-libp2p/gologshim"
 	basichost "github.com/libp2p/go-libp2p/p2p/host/basic"
 	"github.com/libp2p/go-libp2p/p2p/host/eventbus"
 
@@ -158,7 +158,7 @@ func NewManager(eventbus event.Bus, net network.Network) (*Manager, error) {
 		la := net.ListenAddresses()
 		ila, err := net.InterfaceListenAddresses()
 		if err != nil {
-			log.Warnf("error getting interface listen addresses: %s", err)
+			log.Warn("error getting interface listen addresses", "err", err)
 		}
 		return append(la, ila...)
 	}
@@ -194,12 +194,12 @@ func (o *Manager) Start(n network.Network) {
 
 	sub, err := o.eventbus.Subscribe(new(event.EvtPeerIdentificationCompleted), eventbus.Name("observed-addrs-manager"))
 	if err != nil {
-		log.Errorf("failed to start observed addrs manager: identify subscription failed: %s", err)
+		log.Error("failed to start observed addrs manager: identify subscription failed.", "err", err)
 		return
 	}
 	emitter, err := o.eventbus.Emitter(new(event.EvtNATDeviceTypeChanged), eventbus.Stateful)
 	if err != nil {
-		log.Errorf("failed to start observed addrs manager: nat device type changed emitter error: %s", err)
+		log.Error("failed to start observed addrs manager: nat device type changed emitter error.", "err", err)
 		sub.Close()
 		return
 	}
@@ -326,7 +326,7 @@ func (o *Manager) eventHandler(identifySub event.Subscription, natEmitter event.
 				observed: evt.ObservedAddr,
 			}:
 			default:
-				log.Debugw("dropping address observation due to full buffer",
+				log.Debug("dropping address observation due to full buffer",
 					"from", evt.Conn.RemoteMultiaddr(),
 					"observed", evt.ObservedAddr,
 				)
@@ -387,6 +387,7 @@ func (o *Manager) shouldRecordObservation(conn connMultiaddrs, observed ma.Multi
 
 	localTW, err := thinWaistForm(conn.LocalMultiaddr())
 	if err != nil {
+		log.Info("failed to get interface listen addrs", "err", err)
 		return false, thinWaist{}, thinWaist{}
 	}
 
@@ -410,7 +411,11 @@ func (o *Manager) shouldRecordObservation(conn connMultiaddrs, observed ma.Multi
 		return false, thinWaist{}, thinWaist{}
 	}
 	if !hasConsistentTransport(localTW.TW, observedTW.TW) {
-		log.Debugf("invalid observed address %s for local address %s", observed, localTW.Addr)
+		log.Debug(
+			"invalid observed address for local address",
+			"observed", observed,
+			"local", localTW.Addr,
+		)
 		return false, thinWaist{}, thinWaist{}
 	}
 
@@ -422,7 +427,7 @@ func (o *Manager) maybeRecordObservation(conn connMultiaddrs, observed ma.Multia
 	if !shouldRecord {
 		return
 	}
-	log.Debugw("added own observed listen addr", "conn", conn, "observed", observed)
+	log.Debug("added own observed listen addr", "conn", conn, "observed", observed)
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
