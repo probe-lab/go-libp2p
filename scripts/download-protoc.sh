@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -eou pipefail
 
+# This script requires bash 4+, some macOS installations have bash 3
+
 # Specify the protobuf release version
 PROTOBUF_VERSION="29.2"
 
