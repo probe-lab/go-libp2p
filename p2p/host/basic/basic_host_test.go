@@ -596,7 +596,7 @@ func TestAddrChangeImmediatelyIfAddressNonEmpty(t *testing.T) {
 	ctx := context.Background()
 	taddrs := []ma.Multiaddr{ma.StringCast("/ip4/1.2.3.4/tcp/1234")}
 
-	h, err := NewHost(swarmt.GenSwarm(t), &HostOpts{AddrsFactory: func(addrs []ma.Multiaddr) []ma.Multiaddr {
+	h, err := NewHost(swarmt.GenSwarm(t), &HostOpts{AddrsFactory: func(_ []ma.Multiaddr) []ma.Multiaddr {
 		return taddrs
 	}})
 	require.NoError(t, err)
