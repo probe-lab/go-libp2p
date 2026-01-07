@@ -207,8 +207,12 @@ type NetworkSettings struct {
 	BlankHostOptsForHostIdx func(idx int) BlankHostOpts
 }
 
-func SimpleLibp2pNetwork(linkSettings []NodeLinkSettingsAndCount, networkSettings NetworkSettings) (*simnet.Simnet, *SimpleLibp2pNetworkMeta, error) {
-	nw := &simnet.Simnet{}
+type LatencyFunc func(*simnet.Packet) time.Duration
+
+func SimpleLibp2pNetwork(linkSettings []NodeLinkSettingsAndCount, latencyFunc LatencyFunc, networkSettings NetworkSettings) (*simnet.Simnet, *SimpleLibp2pNetworkMeta, error) {
+	nw := &simnet.Simnet{
+		LatencyFunc: latencyFunc,
+	}
 	meta := &SimpleLibp2pNetworkMeta{
 		AddrToNode: make(map[string]HostAndIdx),
 	}
@@ -261,12 +265,12 @@ func SimpleLibp2pNetwork(linkSettings []NodeLinkSettingsAndCount, networkSetting
 // GetBasicHostPair gets a new pair of hosts.
 // The first host initiates the connection to the second host.
 func GetBasicHostPair(t *testing.T) (host.Host, host.Host) {
-	network, meta, err := SimpleLibp2pNetwork([]NodeLinkSettingsAndCount{
-		{LinkSettings: simnet.NodeBiDiLinkSettings{
-			Downlink: simnet.LinkSettings{BitsPerSecond: 20 * OneMbps, Latency: 100 * time.Millisecond / 2}, // Divide by two since this is latency for each direction
-			Uplink:   simnet.LinkSettings{BitsPerSecond: 20 * OneMbps, Latency: 100 * time.Millisecond / 2},
+	network, meta, err := SimpleLibp2pNetwork([]NodeLinkSettingsAndCount{{
+		LinkSettings: simnet.NodeBiDiLinkSettings{
+			Downlink: simnet.LinkSettings{BitsPerSecond: 20 * OneMbps},
+			Uplink:   simnet.LinkSettings{BitsPerSecond: 20 * OneMbps},
 		}, Count: 2},
-	}, NetworkSettings{})
+	}, simnet.StaticLatency(100/2*time.Millisecond), NetworkSettings{})
 	require.NoError(t, err)
 	network.Start()
 	t.Cleanup(func() {
