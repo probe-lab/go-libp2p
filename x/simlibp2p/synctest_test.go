@@ -1,4 +1,4 @@
-//go:build goexperiment.synctest
+//go:build go1.25
 
 package simconnlibp2p_test
 
@@ -19,7 +19,7 @@ import (
 )
 
 func TestSimpleLibp2pNetwork_synctest(t *testing.T) {
-	synctest.Run(func() {
+	synctest.Test(t, func(t *testing.T) {
 		latency := 10 * time.Millisecond
 		network, meta, err := simlibp2p.SimpleLibp2pNetwork([]simlibp2p.NodeLinkSettingsAndCount{
 			{LinkSettings: simnet.NodeBiDiLinkSettings{
