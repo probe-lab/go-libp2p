@@ -1,6 +1,6 @@
 //go:build go1.25
 
-package simconnlibp2p_test
+package simlibp2p_test
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
-	simlibp2p "github.com/libp2p/go-libp2p/x/simlibp2p"
+	"github.com/libp2p/go-libp2p/x/simlibp2p"
 	"github.com/marcopolo/simnet"
 	"github.com/stretchr/testify/require"
 )

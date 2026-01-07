@@ -1,4 +1,4 @@
-package simconnlibp2p
+package simlibp2p
 
 import (
 	"context"
