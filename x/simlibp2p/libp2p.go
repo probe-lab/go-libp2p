@@ -1,6 +1,7 @@
 package simconnlibp2p
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"net"
@@ -255,4 +256,29 @@ func SimpleLibp2pNetwork(linkSettings []NodeLinkSettingsAndCount, networkSetting
 	}
 
 	return nw, meta, nil
+}
+
+// GetBasicHostPair gets a new pair of hosts.
+// The first host initiates the connection to the second host.
+func GetBasicHostPair(t *testing.T) (host.Host, host.Host) {
+	network, meta, err := SimpleLibp2pNetwork([]NodeLinkSettingsAndCount{
+		{LinkSettings: simnet.NodeBiDiLinkSettings{
+			Downlink: simnet.LinkSettings{BitsPerSecond: 20 * OneMbps, Latency: 100 * time.Millisecond / 2}, // Divide by two since this is latency for each direction
+			Uplink:   simnet.LinkSettings{BitsPerSecond: 20 * OneMbps, Latency: 100 * time.Millisecond / 2},
+		}, Count: 2},
+	}, NetworkSettings{})
+	require.NoError(t, err)
+	network.Start()
+	t.Cleanup(func() {
+		network.Close()
+	})
+
+	h1 := meta.Nodes[0]
+	h2 := meta.Nodes[1]
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	h2pi := h2.Peerstore().PeerInfo(h2.ID())
+	require.NoError(t, h1.Connect(ctx, h2pi))
+	return h1, h2
 }
