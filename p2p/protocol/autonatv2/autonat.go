@@ -17,6 +17,9 @@ import (
 	logging "github.com/libp2p/go-libp2p/gologshim"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const (
@@ -179,6 +182,9 @@ func (an *AutoNAT) Close() {
 
 // GetReachability makes a single dial request for checking reachability for requested addresses
 func (an *AutoNAT) GetReachability(ctx context.Context, reqs []Request) (Result, error) {
+	ctx, span := otel.Tracer("autonatv2").Start(ctx, "autonatv2.server_selection")
+	defer span.End()
+
 	var filteredReqs []Request
 	if !an.allowPrivateAddrs {
 		filteredReqs = make([]Request, 0, len(reqs))
@@ -190,6 +196,7 @@ func (an *AutoNAT) GetReachability(ctx context.Context, reqs []Request) (Result,
 			}
 		}
 		if len(filteredReqs) == 0 {
+			span.SetStatus(codes.Error, ErrPrivateAddrs.Error())
 			return Result{}, ErrPrivateAddrs
 		}
 	} else {
@@ -198,8 +205,11 @@ func (an *AutoNAT) GetReachability(ctx context.Context, reqs []Request) (Result,
 	an.mx.Lock()
 	now := time.Now()
 	var p peer.ID
+	numThrottled := 0
+	numCandidates := len(an.peers.peers)
 	for pr := range an.peers.Shuffled() {
 		if t := an.throttlePeer[pr]; t.After(now) {
+			numThrottled++
 			continue
 		}
 		p = pr
@@ -207,12 +217,24 @@ func (an *AutoNAT) GetReachability(ctx context.Context, reqs []Request) (Result,
 		break
 	}
 	an.mx.Unlock()
+
+	span.SetAttributes(
+		attribute.Int("autonat.num_candidates", numCandidates),
+		attribute.Int("autonat.num_throttled", numThrottled),
+	)
+
 	if p == "" {
+		span.SetStatus(codes.Error, ErrNoPeers.Error())
 		return Result{}, ErrNoPeers
 	}
+
+	span.SetAttributes(attribute.String("autonat.selected_peer", p.String()))
+
 	res, err := an.cli.GetReachability(ctx, p, filteredReqs)
 	if err != nil {
 		log.Debug("reachability check failed", "peer", p, "err", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return res, fmt.Errorf("reachability check with %s failed: %w", p, err)
 	}
 	// restore the correct index in case we'd filtered private addresses
@@ -223,6 +245,7 @@ func (an *AutoNAT) GetReachability(ctx context.Context, reqs []Request) (Result,
 		}
 	}
 	log.Debug("reachability check successful", "peer", p)
+	span.SetStatus(codes.Ok, "")
 	return res, nil
 }
 

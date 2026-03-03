@@ -16,6 +16,10 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/protocol/autonatv2/pb"
 	"github.com/libp2p/go-msgio/pbio"
 	ma "github.com/multiformats/go-multiaddr"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // client implements the client for making dial requests for AutoNAT v2. It verifies successful
@@ -64,18 +68,38 @@ func (ac *client) getReachability(ctx context.Context, p peer.ID, reqs []Request
 	ctx, cancel := context.WithTimeout(ctx, streamTimeout)
 	defer cancel()
 
+	// Build address list for span attributes
+	addrStrs := make([]string, len(reqs))
+	for i, r := range reqs {
+		addrStrs[i] = r.Addr.String()
+	}
+
+	ctx, span := otel.Tracer("autonatv2").Start(ctx, "autonatv2.probe",
+		trace.WithAttributes(
+			attribute.String("autonat.server_peer_id", p.String()),
+			attribute.Int("autonat.num_addrs", len(reqs)),
+			attribute.StringSlice("autonat.addrs", addrStrs),
+		))
+	defer span.End()
+
 	s, err := ac.host.NewStream(ctx, p, DialProtocol)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return Result{}, fmt.Errorf("open %s stream failed: %w", DialProtocol, err)
 	}
 
 	if err := s.Scope().SetService(ServiceName); err != nil {
 		s.Reset()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return Result{}, fmt.Errorf("attach stream %s to service %s failed: %w", DialProtocol, ServiceName, err)
 	}
 
 	if err := s.Scope().ReserveMemory(maxMsgSize, network.ReservationPriorityAlways); err != nil {
 		s.Reset()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return Result{}, fmt.Errorf("failed to reserve memory for stream %s: %w", DialProtocol, err)
 	}
 	defer s.Scope().ReleaseMemory(maxMsgSize)
@@ -84,6 +108,7 @@ func (ac *client) getReachability(ctx context.Context, p peer.ID, reqs []Request
 	defer s.Close()
 
 	nonce := rand.Uint64()
+	span.SetAttributes(attribute.Int64("autonat.nonce", int64(nonce)))
 	ch := make(chan ma.Multiaddr, 1)
 	ac.mu.Lock()
 	ac.dialBackQueues[nonce] = ch
@@ -98,12 +123,17 @@ func (ac *client) getReachability(ctx context.Context, p peer.ID, reqs []Request
 	w := pbio.NewDelimitedWriter(s)
 	if err := w.WriteMsg(&msg); err != nil {
 		s.Reset()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return Result{}, fmt.Errorf("dial request write failed: %w", err)
 	}
+	span.AddEvent("dial_request_sent")
 
 	r := pbio.NewDelimitedReader(s, maxMsgSize)
 	if err := r.ReadMsg(&msg); err != nil {
 		s.Reset()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return Result{}, fmt.Errorf("dial msg read failed: %w", err)
 	}
 
@@ -114,41 +144,75 @@ func (ac *client) getReachability(ctx context.Context, p peer.ID, reqs []Request
 	case msg.GetDialDataRequest() != nil:
 		if err := validateDialDataRequest(reqs, &msg); err != nil {
 			s.Reset()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return Result{}, fmt.Errorf("invalid dial data request: %s %w", s.Conn().RemoteMultiaddr(), err)
 		}
+		span.AddEvent("dial_data_requested",
+			trace.WithAttributes(
+				attribute.Int64("num_bytes", int64(msg.GetDialDataRequest().GetNumBytes())),
+			))
 		// dial data request is valid and we want to send data
 		if err := sendDialData(ac.dialData, int(msg.GetDialDataRequest().GetNumBytes()), w, &msg); err != nil {
 			s.Reset()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return Result{}, fmt.Errorf("dial data send failed: %w", err)
 		}
 		if err := r.ReadMsg(&msg); err != nil {
 			s.Reset()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return Result{}, fmt.Errorf("dial response read failed: %w", err)
 		}
 		if msg.GetDialResponse() == nil {
 			s.Reset()
-			return Result{}, fmt.Errorf("invalid response type: %T", msg.Msg)
+			err := fmt.Errorf("invalid response type: %T", msg.Msg)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return Result{}, err
 		}
 	default:
 		s.Reset()
-		return Result{}, fmt.Errorf("invalid msg type: %T", msg.Msg)
+		err := fmt.Errorf("invalid msg type: %T", msg.Msg)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return Result{}, err
 	}
 
 	resp := msg.GetDialResponse()
+	span.AddEvent("response_received",
+		trace.WithAttributes(
+			attribute.String("response_status", pb.DialResponse_ResponseStatus_name[int32(resp.GetStatus())]),
+			attribute.String("dial_status", pb.DialStatus_name[int32(resp.GetDialStatus())]),
+			attribute.Int("addr_idx", int(resp.GetAddrIdx())),
+		))
+
 	if resp.GetStatus() != pb.DialResponse_OK {
 		// E_DIAL_REFUSED has implication for deciding future address verificiation priorities
 		// wrap a distinct error for convenient errors.Is usage
 		if resp.GetStatus() == pb.DialResponse_E_DIAL_REFUSED {
+			span.SetAttributes(attribute.String("autonat.reachability", "refused"))
+			span.SetStatus(codes.Ok, "all addrs refused")
 			return Result{AllAddrsRefused: true}, nil
 		}
-		return Result{}, fmt.Errorf("dial request failed: response status %d %s", resp.GetStatus(),
+		err := fmt.Errorf("dial request failed: response status %d %s", resp.GetStatus(),
 			pb.DialResponse_ResponseStatus_name[int32(resp.GetStatus())])
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return Result{}, err
 	}
 	if resp.GetDialStatus() == pb.DialStatus_UNUSED {
-		return Result{}, fmt.Errorf("invalid response: invalid dial status UNUSED")
+		err := fmt.Errorf("invalid response: invalid dial status UNUSED")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return Result{}, err
 	}
 	if int(resp.AddrIdx) >= len(reqs) {
-		return Result{}, fmt.Errorf("invalid response: addr index out of range: %d [0-%d)", resp.AddrIdx, len(reqs))
+		err := fmt.Errorf("invalid response: addr index out of range: %d [0-%d)", resp.AddrIdx, len(reqs))
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return Result{}, err
 	}
 	// wait for nonce from the server
 	var dialBackAddr ma.Multiaddr
@@ -157,12 +221,44 @@ func (ac *client) getReachability(ctx context.Context, p peer.ID, reqs []Request
 		select {
 		case at := <-ch:
 			dialBackAddr = at
+			span.AddEvent("dial_back_received",
+				trace.WithAttributes(
+					attribute.String("addr", at.String()),
+				))
 		case <-ctx.Done():
+			span.AddEvent("dial_back_timeout", trace.WithAttributes(
+				attribute.String("reason", "context_done"),
+			))
 		case <-timer.C:
+			span.AddEvent("dial_back_timeout", trace.WithAttributes(
+				attribute.String("reason", "timer_expired"),
+			))
 		}
 		timer.Stop()
 	}
-	return ac.newResult(resp, reqs, dialBackAddr)
+	result, err := ac.newResult(resp, reqs, dialBackAddr)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return result, err
+	}
+
+	// Record final reachability result
+	var reachStr string
+	switch result.Reachability {
+	case network.ReachabilityPublic:
+		reachStr = "public"
+	case network.ReachabilityPrivate:
+		reachStr = "private"
+	default:
+		reachStr = "unknown"
+	}
+	span.SetAttributes(
+		attribute.String("autonat.reachability", reachStr),
+		attribute.String("autonat.dialed_addr", result.Addr.String()),
+	)
+	span.SetStatus(codes.Ok, "")
+	return result, nil
 }
 
 func validateDialDataRequest(reqs []Request, msg *pb.Message) error {

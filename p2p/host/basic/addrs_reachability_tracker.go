@@ -15,6 +15,10 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/protocol/autonatv2"
 	ma "github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type autonatv2Client interface {
@@ -264,8 +268,16 @@ func (r *addrsReachabilityTracker) refreshReachability() reachabilityTask {
 	go func() {
 		defer r.wg.Done()
 		defer cancel()
+
+		ctx, refreshSpan := otel.Tracer("autonatv2").Start(ctx, "autonatv2.refresh_cycle",
+			trace.WithAttributes(
+				attribute.Int("autonat.max_concurrency", r.maxConcurrency),
+			))
+		defer refreshSpan.End()
+
 		client := &errCountingClient{autonatv2Client: r.client, MaxConsecutiveErrors: maxConsecutiveErrors}
 		var backoff atomic.Bool
+		var probeCount atomic.Int32
 		var wg sync.WaitGroup
 		wg.Add(r.maxConcurrency)
 		for range r.maxConcurrency {
@@ -279,11 +291,32 @@ func (r *addrsReachabilityTracker) refreshReachability() reachabilityTask {
 					if len(reqs) == 0 {
 						return
 					}
+					probeCount.Add(1)
 					r.probeManager.MarkProbeInProgress(reqs)
 					rctx, cancel := context.WithTimeout(ctx, probeTimeout)
 					res, err := client.GetReachability(rctx, reqs)
 					cancel()
 					r.probeManager.CompleteProbe(reqs, res, err)
+
+					// Record probe completion as an event on the refresh span
+					if err == nil {
+						var reachStr string
+						switch res.Reachability {
+						case network.ReachabilityPublic:
+							reachStr = "public"
+						case network.ReachabilityPrivate:
+							reachStr = "private"
+						default:
+							reachStr = "unknown"
+						}
+						refreshSpan.AddEvent("probe_completed",
+							trace.WithAttributes(
+								attribute.String("addr", res.Addr.String()),
+								attribute.String("reachability", reachStr),
+								attribute.Bool("all_addrs_refused", res.AllAddrsRefused),
+							))
+					}
+
 					if isErrorPersistent(err) {
 						backoff.Store(true)
 						return
@@ -292,6 +325,15 @@ func (r *addrsReachabilityTracker) refreshReachability() reachabilityTask {
 			}()
 		}
 		wg.Wait()
+		refreshSpan.SetAttributes(
+			attribute.Int("autonat.num_probes", int(probeCount.Load())),
+			attribute.Bool("autonat.backoff", backoff.Load()),
+		)
+		if backoff.Load() {
+			refreshSpan.SetStatus(codes.Error, "backoff due to persistent errors")
+		} else {
+			refreshSpan.SetStatus(codes.Ok, "")
+		}
 		resCh <- backoff.Load()
 	}()
 	return reachabilityTask{Cancel: cancel, BackoffCh: resCh}
