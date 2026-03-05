@@ -314,6 +314,7 @@ func (r *addrsReachabilityTracker) refreshReachability() reachabilityTask {
 								attribute.String("addr", res.Addr.String()),
 								attribute.String("reachability", reachStr),
 								attribute.Bool("all_addrs_refused", res.AllAddrsRefused),
+								attribute.Int("autonat.confidence", r.probeManager.Confidence(res.Addr)),
 							))
 					}
 
@@ -590,6 +591,19 @@ func (m *probeManager) InProgressProbes() int {
 	m.mx.Lock()
 	defer m.mx.Unlock()
 	return m.inProgressProbesTotal
+}
+
+// Confidence returns the current confidence score for an address (successes - failures
+// within the sliding window). Returns 0 if the address is not tracked.
+func (m *probeManager) Confidence(addr ma.Multiaddr) int {
+	m.mx.Lock()
+	defer m.mx.Unlock()
+	s, ok := m.statuses[string(addr.Bytes())]
+	if !ok {
+		return 0
+	}
+	_, successes, failures := s.reachabilityAndCounts()
+	return successes - failures
 }
 
 // CompleteProbe should be called when a probe completes.
