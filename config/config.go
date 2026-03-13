@@ -70,6 +70,8 @@ type AutoNATConfig struct {
 	ThrottleGlobalLimit int
 	ThrottlePeerLimit   int
 	ThrottleInterval    time.Duration
+	RetryInterval       time.Duration
+	RefreshInterval     time.Duration
 }
 
 type Security struct {
@@ -748,6 +750,17 @@ func (cfg *Config) addAutoNAT(h *bhost.BasicHost) error {
 			app.Stop(context.Background())
 		}()
 		autonatOpts = append(autonatOpts, autonat.EnableService(dialer))
+	}
+	if cfg.AutoNATConfig.RetryInterval != 0 || cfg.AutoNATConfig.RefreshInterval != 0 {
+		retry := cfg.AutoNATConfig.RetryInterval
+		refresh := cfg.AutoNATConfig.RefreshInterval
+		if retry == 0 {
+			retry = 90 * time.Second // default
+		}
+		if refresh == 0 {
+			refresh = 15 * time.Minute // default
+		}
+		autonatOpts = append(autonatOpts, autonat.WithSchedule(retry, refresh))
 	}
 	if cfg.AutoNATConfig.ForceReachability != nil {
 		autonatOpts = append(autonatOpts, autonat.WithReachability(*cfg.AutoNATConfig.ForceReachability))

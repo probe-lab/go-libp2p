@@ -387,6 +387,17 @@ func AutoNATServiceRateLimit(global, perPeer int, interval time.Duration) Option
 	}
 }
 
+// AutoNATSchedule configures the v1 AutoNAT probe schedule.
+// retryInterval is how often to probe when confidence is low.
+// refreshInterval is how often to probe when confidence is high.
+func AutoNATSchedule(retryInterval, refreshInterval time.Duration) Option {
+	return func(cfg *Config) error {
+		cfg.AutoNATConfig.RetryInterval = retryInterval
+		cfg.AutoNATConfig.RefreshInterval = refreshInterval
+		return nil
+	}
+}
+
 // ConnectionGater configures libp2p to use the given ConnectionGater
 // to actively reject inbound/outbound connections based on the lifecycle stage
 // of the connection.
