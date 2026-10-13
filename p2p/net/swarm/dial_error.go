@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,11 @@ import (
 
 	ma "github.com/multiformats/go-multiaddr"
 )
+
+// ErrDialInProgress is recorded in a DialError for an address whose dial was
+// still in progress when the context of the dial request ended. The recorded
+// error also wraps the context error.
+var ErrDialInProgress = errors.New("dial in progress when the context ended")
 
 // DialError is the error type returned when dialing.
 type DialError struct {
