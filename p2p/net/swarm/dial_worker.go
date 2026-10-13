@@ -2,7 +2,6 @@ package swarm
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -397,7 +396,7 @@ loop:
 
 // cancelRequest answers the pending request with the given response channel
 // after the context of its caller ended. The DialError holds the errors of the
-// dials that completed and ErrDialInProgress for the dials that were still in
+// dials that completed and the context error for the dials that were still in
 // progress. Addresses that weren't dialed yet are left out. If the request was
 // answered already, cancelRequest does nothing.
 func (w *dialWorker) cancelRequest(resch chan dialResponse, cause error) {
@@ -411,7 +410,7 @@ func (w *dialWorker) cancelRequest(resch chan dialResponse, cause error) {
 			if !ok || !ad.dialed || ad.err != nil || ad.conn != nil {
 				continue
 			}
-			pr.err.recordErr(ad.addr, fmt.Errorf("%w: %w", ErrDialInProgress, cause))
+			pr.err.recordErr(ad.addr, cause)
 		}
 		pr.err.Cause = cause
 		pr.req.resch <- dialResponse{err: pr.err}

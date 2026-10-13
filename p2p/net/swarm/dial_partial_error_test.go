@@ -94,7 +94,6 @@ func TestDialPeerReportsDialErrorsWhenContextEnds(t *testing.T) {
 		}
 		require.Len(t, causes, 2)
 		require.ErrorIs(t, causes[refused.String()], errPartialRefused)
-		require.ErrorIs(t, causes[inProgress.String()], ErrDialInProgress)
 		require.ErrorIs(t, causes[inProgress.String()], context.DeadlineExceeded)
 		require.NotContains(t, causes, notDialed.String())
 	})
