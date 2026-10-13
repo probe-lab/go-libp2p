@@ -272,7 +272,13 @@ func (s *Swarm) dialPeer(ctx context.Context, p peer.ID) (*Conn, error) {
 	log.Debug("network finished dialing peer", "local", s.local, "remote", p)
 
 	if ctx.Err() != nil {
-		// Context error trumps any dial errors as it was likely the ultimate cause.
+		// Context error trumps any dial errors as it was likely the ultimate
+		// cause. Keep the errors of the individual dials, though.
+		var derr *DialError
+		if errors.As(err, &derr) {
+			derr.Cause = ctx.Err()
+			return nil, derr
+		}
 		return nil, ctx.Err()
 	}
 

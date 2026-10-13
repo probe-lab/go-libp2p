@@ -24,6 +24,10 @@ type dialRequest struct {
 	ctx context.Context
 	// resch is the channel used to send the response for this query
 	resch chan dialResponse
+	// cancelErr marks a request that ends the earlier request with the same
+	// resch, because the context of its caller ended. The worker answers the
+	// earlier request with the errors of its dials so far (see cancelRequest).
+	cancelErr error
 }
 
 // dialResponse is the response sent to dialRequests on the request's resch channel
@@ -165,6 +169,10 @@ loop:
 					w.s.metricsTracer.DialCompleted(w.connected, totalDials, time.Since(startTime))
 				}
 				return
+			}
+			if req.cancelErr != nil {
+				w.cancelRequest(req.resch, req.cancelErr)
+				continue loop
 			}
 			// We have received a new request. If we do not have a suitable connection,
 			// track this dialRequest with a pendRequest.
@@ -383,6 +391,30 @@ loop:
 			// required because the final successful dial will spawn one more dial
 			scheduleNextDial()
 		}
+	}
+}
+
+// cancelRequest answers the pending request with the given response channel
+// after the context of its caller ended. The DialError holds the errors of the
+// dials that completed and the context error for the dials that were still in
+// progress. Addresses that weren't dialed yet are left out. If the request was
+// answered already, cancelRequest does nothing.
+func (w *dialWorker) cancelRequest(resch chan dialResponse, cause error) {
+	for pr := range w.pendingRequests {
+		if pr.req.resch != resch {
+			continue
+		}
+		delete(w.pendingRequests, pr)
+		for a := range pr.addrs {
+			ad, ok := w.trackedDials[a]
+			if !ok || !ad.dialed || ad.err != nil || ad.conn != nil {
+				continue
+			}
+			pr.err.recordErr(ad.addr, cause)
+		}
+		pr.err.Cause = cause
+		pr.req.resch <- dialResponse{err: pr.err}
+		return
 	}
 }
 

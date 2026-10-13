@@ -64,6 +64,17 @@ func (ad *activeDial) dial(ctx context.Context) (*Conn, error) {
 	case res := <-resch:
 		return res.conn, res.err
 	case <-ctx.Done():
+	}
+
+	// The context ended while the worker was still dialing. Ask the worker
+	// for the errors of the dials so far. It answers on resch right away, or
+	// it has answered already. If the worker is busy, return the context
+	// error without waiting.
+	select {
+	case ad.reqch <- dialRequest{resch: resch, cancelErr: ctx.Err()}:
+		res := <-resch
+		return res.conn, res.err
+	default:
 		return nil, ctx.Err()
 	}
 }
