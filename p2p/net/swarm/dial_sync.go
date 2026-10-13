@@ -3,7 +3,9 @@ package swarm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -14,6 +16,14 @@ type dialWorkerFunc func(peer.ID, <-chan dialRequest)
 
 // errConcurrentDialSuccessful is used to signal that a concurrent dial succeeded
 var errConcurrentDialSuccessful = errors.New("concurrent dial successful")
+
+const (
+	// cancelSendRetries is the number of times a caller whose context ended
+	// retries to hand its cancel request to a busy dial worker.
+	cancelSendRetries = 3
+	// cancelSendRetryDelay is the pause between those retries.
+	cancelSendRetryDelay = time.Millisecond
+)
 
 // newDialSync constructs a new dialSync
 func newDialSync(worker dialWorkerFunc) *dialSync {
@@ -64,7 +74,34 @@ func (ad *activeDial) dial(ctx context.Context) (*Conn, error) {
 	case res := <-resch:
 		return res.conn, res.err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		// The dial may still be running. Ask the worker for the results it has
+		// collected so far. Once the worker has taken the cancel request it
+		// always answers on resch: with the dial's own response if it
+		// completed in the meantime, or with a DialError that wraps the
+		// context error and lists the per-address results.
+		//
+		// The send must not block without bound. The worker may be busy
+		// delivering a connectedness event, and the consumer of that event
+		// may be the caller of this very function. Waiting for the worker
+		// would then deadlock. So the send is retried a few times with short
+		// pauses. If the worker stays busy, the plain context error is
+		// returned, marked with ErrDialResultsUnavailable.
+		cancelReq := dialRequest{resch: resch, cancelErr: ctx.Err()}
+		for attempt := 0; ; attempt++ {
+			select {
+			case ad.reqch <- cancelReq:
+				res := <-resch
+				return res.conn, res.err
+			case res := <-resch:
+				// the worker answered in the meantime
+				return res.conn, res.err
+			default:
+			}
+			if attempt == cancelSendRetries {
+				return nil, fmt.Errorf("%w: %w", ErrDialResultsUnavailable, ctx.Err())
+			}
+			time.Sleep(cancelSendRetryDelay)
+		}
 	}
 }
 

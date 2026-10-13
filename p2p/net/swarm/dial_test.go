@@ -2,6 +2,7 @@ package swarm_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -650,4 +651,51 @@ func TestDialQUICDraft29(t *testing.T) {
 	_, err := s.DialPeer(context.Background(), id)
 	require.ErrorIs(t, err, swarm.ErrQUICDraft29)
 	require.ErrorIs(t, err, swarm.ErrNoTransport)
+}
+
+// TestDialPeerContextTimeout checks that a dial that ends because of the
+// context still reports what happened per address.
+func TestDialPeerContextTimeout(t *testing.T) {
+	swarms := makeSwarms(t, 1, swarmt.WithSwarmOpts(
+		swarm.WithDialTimeout(10*time.Second),
+		swarm.WithDialRanker(swarm.NoDelayDialRanker),
+	))
+	defer closeSwarms(swarms)
+	s1 := swarms[0]
+
+	// silent: accepts the connection and never completes the handshake
+	p2, silentAddr, silentListener := newSilentPeer(t)
+	go acceptAndHang(silentListener)
+	defer silentListener.Close()
+
+	// refused: nothing listens here, the dial fails right away
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	refusedAddr, err := manet.FromNetAddr(l.Addr())
+	require.NoError(t, err)
+	l.Close()
+
+	s1.Peerstore().AddAddrs(p2, []ma.Multiaddr{silentAddr, refusedAddr}, peerstore.PermanentAddrTTL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	conn, err := s1.DialPeer(ctx, p2)
+	require.Nil(t, conn)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	dialErr, ok := errors.AsType[*swarm.DialError](err)
+	require.True(t, ok, "expected *swarm.DialError, got %T", err)
+	require.Equal(t, context.DeadlineExceeded, dialErr.Cause)
+	require.True(t, dialErr.Timeout())
+	require.Len(t, dialErr.DialErrors, 2)
+	for _, te := range dialErr.DialErrors {
+		switch {
+		case te.Address.Equal(silentAddr):
+			require.Equal(t, context.DeadlineExceeded, te.Cause)
+		case te.Address.Equal(refusedAddr):
+			require.NotErrorIs(t, te.Cause, context.DeadlineExceeded)
+		default:
+			t.Fatalf("unexpected address in dial errors: %s", te.Address)
+		}
+	}
 }

@@ -213,6 +213,26 @@ func (dl *dialLimiter) clearAllPeerDials(p peer.ID) {
 	// point
 }
 
+// waitingAddrs returns the addresses of p's dial jobs that report to resp and
+// still wait for a peer or FD token. Their dial has not started.
+func (dl *dialLimiter) waitingAddrs(p peer.ID, resp chan transport.DialUpdate) map[string]struct{} {
+	dl.lk.Lock()
+	defer dl.lk.Unlock()
+
+	addrs := make(map[string]struct{})
+	for _, dj := range dl.waitingOnPeerLimit[p] {
+		if dj.resp == resp {
+			addrs[string(dj.addr.Bytes())] = struct{}{}
+		}
+	}
+	for _, dj := range dl.waitingOnFd {
+		if dj.peer == p && dj.resp == resp {
+			addrs[string(dj.addr.Bytes())] = struct{}{}
+		}
+	}
+	return addrs
+}
+
 // executeDial calls the dialFunc, and reports the result through the response
 // channel when finished. Once the response is sent it also releases all tokens
 // it held during the dial.

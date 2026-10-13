@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	mrand "math/rand"
+	"net"
 	"reflect"
 	"sort"
 	"sync"
@@ -1184,4 +1185,183 @@ func BenchmarkDialRanker(b *testing.B) {
 			benchDialQueue(addrDelays)
 		}
 	})
+}
+
+// TestDialWorkerLoopCancelRequest checks the response to a cancelled request.
+// Addresses whose dial finished carry their own error. Addresses whose dial is
+// still running carry the cancel error. Addresses not scheduled yet are left
+// out.
+func TestDialWorkerLoopCancelRequest(t *testing.T) {
+	// refused: nothing listens here, the dial fails right away
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	refused, err := manet.FromNetAddr(l.Addr())
+	require.NoError(t, err)
+	l.Close()
+
+	// silent: accepts the connection and never completes the handshake
+	l, err = net.Listen("tcp4", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer l.Close()
+	silent, err := manet.FromNetAddr(l.Addr())
+	require.NoError(t, err)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+
+	// unscheduled: the ranker delays this one long enough that it is never dialed
+	unscheduled := ma.StringCast("/ip4/127.0.0.1/tcp/1")
+
+	ranker := func(addrs []ma.Multiaddr) []network.AddrDelay {
+		res := make([]network.AddrDelay, 0, len(addrs))
+		for _, a := range addrs {
+			delay := time.Duration(0)
+			if a.Equal(unscheduled) {
+				delay = time.Hour
+			}
+			res = append(res, network.AddrDelay{Addr: a, Delay: delay})
+		}
+		return res
+	}
+
+	s1 := makeSwarmWithNoListenAddrs(t, WithDialTimeout(10*time.Second), WithDialRanker(ranker))
+	defer s1.Close()
+	_, p2 := newPeer(t)
+	s1.Peerstore().AddAddrs(p2, []ma.Multiaddr{refused, silent, unscheduled}, peerstore.PermanentAddrTTL)
+
+	reqch := make(chan dialRequest)
+	resch := make(chan dialResponse, 1)
+	worker := newDialWorker(s1, p2, reqch, nil)
+	go worker.loop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reqch <- dialRequest{ctx: ctx, resch: resch}
+
+	// wait for the dial to the refused address to fail
+	require.Eventually(t, func() bool { return s1.backf.Backoff(p2, refused) }, 5*time.Second, 10*time.Millisecond)
+
+	cancelErr := errors.New("cancelled")
+	reqch <- dialRequest{ctx: ctx, resch: resch, cancelErr: cancelErr}
+	var res dialResponse
+	select {
+	case res = <-resch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no response to the cancel request")
+	}
+	require.Nil(t, res.conn)
+	require.ErrorIs(t, res.err, cancelErr)
+	dialErr, ok := errors.AsType[*DialError](res.err)
+	require.True(t, ok, "expected *DialError, got %T", res.err)
+	require.Equal(t, cancelErr, dialErr.Cause)
+	require.Len(t, dialErr.DialErrors, 2)
+	for _, te := range dialErr.DialErrors {
+		switch {
+		case te.Address.Equal(refused):
+			require.NotErrorIs(t, te.Cause, cancelErr)
+		case te.Address.Equal(silent):
+			require.Equal(t, cancelErr, te.Cause)
+		default:
+			t.Fatalf("unexpected address in dial errors: %s", te.Address)
+		}
+	}
+
+	// a cancel request for a request that has already completed is ignored
+	reqch <- dialRequest{ctx: ctx, resch: resch, cancelErr: cancelErr}
+	select {
+	case res = <-resch:
+		t.Fatalf("unexpected second response: %v", res)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	close(reqch)
+	worker.wg.Wait()
+}
+
+// TestDialWorkerLoopCancelRequestWaitingDials checks that addresses whose dial
+// waits for a token in the dial limiter are left out of the response to a
+// cancelled request, like addresses the ranker has not scheduled yet.
+func TestDialWorkerLoopCancelRequestWaitingDials(t *testing.T) {
+	tests := []struct {
+		name         string
+		fdLimit      int
+		perPeerLimit int
+	}{
+		{name: "waiting on the per-peer limit", fdLimit: ConcurrentFdDials, perPeerLimit: 1},
+		{name: "waiting on an FD token", fdLimit: 1, perPeerLimit: DefaultPerPeerRateLimit},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// both addresses accept the connection and never complete the handshake
+			accepted := make(chan ma.Multiaddr, 2)
+			var addrs []ma.Multiaddr
+			for range 2 {
+				l, err := net.Listen("tcp4", "127.0.0.1:0")
+				require.NoError(t, err)
+				defer l.Close()
+				addr, err := manet.FromNetAddr(l.Addr())
+				require.NoError(t, err)
+				addrs = append(addrs, addr)
+				go func() {
+					for {
+						c, err := l.Accept()
+						if err != nil {
+							return
+						}
+						defer c.Close()
+						accepted <- addr
+					}
+				}()
+			}
+
+			s1 := makeSwarmWithNoListenAddrs(t, WithDialTimeout(10*time.Second), WithDialRanker(NoDelayDialRanker))
+			defer s1.Close()
+			s1.limiter = newDialLimiterWithParams(s1.dialAddr, tt.fdLimit, tt.perPeerLimit)
+			_, p2 := newPeer(t)
+			s1.Peerstore().AddAddrs(p2, addrs, peerstore.PermanentAddrTTL)
+
+			reqch := make(chan dialRequest)
+			resch := make(chan dialResponse, 1)
+			worker := newDialWorker(s1, p2, reqch, nil)
+			go worker.loop()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			reqch <- dialRequest{ctx: ctx, resch: resch}
+
+			// one dial runs, the other waits for a token
+			var running ma.Multiaddr
+			select {
+			case running = <-accepted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no dial started")
+			}
+
+			cancelErr := errors.New("cancelled")
+			reqch <- dialRequest{resch: resch, cancelErr: cancelErr}
+			var res dialResponse
+			select {
+			case res = <-resch:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no response to the cancel request")
+			}
+			require.Nil(t, res.conn)
+			dialErr, ok := errors.AsType[*DialError](res.err)
+			require.True(t, ok, "expected *DialError, got %T", res.err)
+			require.Len(t, dialErr.DialErrors, 1)
+			require.True(t, dialErr.DialErrors[0].Address.Equal(running))
+			require.Equal(t, cancelErr, dialErr.DialErrors[0].Cause)
+
+			cancel()
+			close(reqch)
+			worker.wg.Wait()
+		})
+	}
 }

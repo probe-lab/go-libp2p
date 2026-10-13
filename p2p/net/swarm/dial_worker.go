@@ -24,6 +24,13 @@ type dialRequest struct {
 	ctx context.Context
 	// resch is the channel used to send the response for this query
 	resch chan dialResponse
+	// cancelErr is set when the caller's context ended before its dial
+	// completed. Such a cancel request has a nil ctx. The worker then starts
+	// no new dial. It completes the pending request that uses the same resch
+	// with a DialError that lists the result of every address dialed so far.
+	// Addresses still in flight carry cancelErr. Addresses whose dial has not
+	// started are left out.
+	cancelErr error
 }
 
 // dialResponse is the response sent to dialRequests on the request's resch channel
@@ -165,6 +172,11 @@ loop:
 					w.s.metricsTracer.DialCompleted(w.connected, totalDials, time.Since(startTime))
 				}
 				return
+			}
+			if req.cancelErr != nil {
+				// cancel requests carry no ctx. Handle them before req.ctx is used.
+				w.cancelRequest(req)
+				continue loop
 			}
 			// We have received a new request. If we do not have a suitable connection,
 			// track this dialRequest with a pendRequest.
@@ -416,6 +428,42 @@ func (w *dialWorker) dispatchError(ad *addrDial, err error) {
 	// dial backoff.
 	if err == ErrDialBackoff {
 		delete(w.trackedDials, string(ad.addr.Bytes()))
+	}
+}
+
+// cancelRequest completes the pending request that shares req.resch with the
+// per-address results collected so far. Addresses whose dial is still running
+// get req.cancelErr. Addresses whose dial has not started are left out: the
+// ranker has not scheduled them yet, or they wait for a token in the dial
+// limiter. If the request has already completed, its response is already in
+// resch and nothing is done.
+func (w *dialWorker) cancelRequest(req dialRequest) {
+	for pr := range w.pendingRequests {
+		if pr.req.resch != req.resch {
+			continue
+		}
+		delete(w.pendingRequests, pr)
+
+		// a connection may have landed from a simultaneous dial that started
+		// later and added new acceptable addrs
+		if c := w.s.bestAcceptableConnToPeer(pr.req.ctx, w.peer); c != nil {
+			pr.req.resch <- dialResponse{conn: c}
+			return
+		}
+		// the worker marks an address as dialed when it hands it to the
+		// limiter, so ask the limiter which dials are still waiting
+		waiting := w.s.limiter.waitingAddrs(w.peer, w.resch)
+		for a := range pr.addrs {
+			if _, ok := waiting[a]; ok {
+				continue
+			}
+			if ad, ok := w.trackedDials[a]; ok && ad.dialed {
+				pr.err.recordErr(ad.addr, req.cancelErr)
+			}
+		}
+		pr.err.Cause = req.cancelErr
+		pr.req.resch <- dialResponse{err: pr.err}
+		return
 	}
 }
 

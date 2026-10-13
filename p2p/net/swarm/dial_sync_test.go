@@ -21,9 +21,40 @@ func getMockDialFunc() (dialWorkerFunc, func(), context.Context, <-chan struct{}
 		defer cancel()
 		dfcalls <- struct{}{}
 		go func() {
-			for req := range reqch {
-				<-ch
-				req.resch <- dialResponse{conn: new(Conn)}
+			// pending requests wait for ch to be closed before they are
+			// answered with a connection. A cancel request is answered with
+			// its cancelErr, like the real worker does.
+			pending := make(map[chan dialResponse]struct{})
+			done := false
+			for {
+				var doneCh <-chan struct{}
+				if !done {
+					doneCh = ch
+				}
+				select {
+				case req, ok := <-reqch:
+					if !ok {
+						return
+					}
+					if req.cancelErr != nil {
+						if _, ok := pending[req.resch]; ok {
+							delete(pending, req.resch)
+							req.resch <- dialResponse{err: req.cancelErr}
+						}
+						continue
+					}
+					if done {
+						req.resch <- dialResponse{conn: new(Conn)}
+						continue
+					}
+					pending[req.resch] = struct{}{}
+				case <-doneCh:
+					done = true
+					for resch := range pending {
+						resch <- dialResponse{conn: new(Conn)}
+					}
+					clear(pending)
+				}
 			}
 		}()
 	}
@@ -225,4 +256,42 @@ func TestStressActiveDial(_ *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// TestDialSyncCancelWorkerBusy checks the result when the worker does not take
+// the cancel request: the context error, marked with ErrDialResultsUnavailable.
+func TestDialSyncCancelWorkerBusy(t *testing.T) {
+	release := make(chan struct{})
+	// the worker takes the first request and then stays busy until released
+	df := func(_ peer.ID, reqch <-chan dialRequest) {
+		go func() {
+			req := <-reqch
+			<-release
+			req.resch <- dialResponse{conn: new(Conn)}
+			for range reqch {
+			}
+		}()
+	}
+	defer close(release)
+
+	dsync := newDialSync(df)
+	p := peer.ID("testpeer")
+	ctx, cancel := context.WithCancel(context.Background())
+
+	finished := make(chan error, 1)
+	go func() {
+		_, err := dsync.Dial(ctx, p)
+		finished <- err
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-finished:
+		require.ErrorIs(t, err, context.Canceled)
+		require.ErrorIs(t, err, ErrDialResultsUnavailable)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the dial to return")
+	}
 }

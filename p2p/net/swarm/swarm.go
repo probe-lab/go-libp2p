@@ -50,6 +50,13 @@ var ErrAddrFiltered = errors.New("address filtered")
 // ErrDialTimeout is returned when one a dial times out due to the global timeout
 var ErrDialTimeout = errors.New("dial timed out")
 
+// ErrDialResultsUnavailable is returned, wrapped together with the context
+// error, when a dial's context ended and the dial worker was busy at that
+// moment. The per-address results of the dials made so far could then not be
+// collected. Otherwise, a dial that ends because of its context returns a
+// DialError that lists them.
+var ErrDialResultsUnavailable = errors.New("per-address dial results unavailable")
+
 type Option func(*Swarm) error
 
 // WithConnectionGater sets a connection gater
